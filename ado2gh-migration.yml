@@ -1,0 +1,787 @@
+trigger: none
+
+parameters:
+- name: runDemoRepoMigration
+  displayName: 'Repo migration & validation only'
+  type: boolean
+  default: false
+
+- name: skipBoardsIntegration
+  displayName: 'Skip Azure Boards Integration (Stage 6)'
+  type: boolean
+  default: false
+
+- name: useSelfHostedAgent
+  displayName: 'Use Self-Hosted Agent'
+  type: boolean
+  default: false
+
+- name: selfHostedAgentPool
+  displayName: 'Self-Hosted Agent Pool Name (if enabled above)'
+  type: string
+  default: 'Default'
+
+variables:
+  # Variable group for migration-related PAT tokens (Stages 1-6)
+  # Contains: GH_PAT, ADO_PAT (for migration, readiness checks, validation, rewiring, boards integration)
+  - group: core-entauto-github-migration-secrets
+
+pool:
+  vmImage: 'ubuntu-latest'
+  
+
+stages:
+  - stage: PrerequisiteValidation
+    displayName: 'Stage 1: Prerequisite Validation'
+    jobs:
+      - job: ValidatePrerequisites
+        displayName: 'Check Prerequisites'
+        ${{ if eq(parameters.useSelfHostedAgent, true) }}:
+          pool:
+            name: ${{ parameters.selfHostedAgentPool }}
+        steps:
+          - checkout: self
+          
+          - task: Bash@3
+            displayName: 'Validate repos.csv File'
+            continueOnError: true
+            name: RepoValidation
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "=========================================="
+                echo "PREREQUISITE VALIDATION - REPOS.CSV"
+                echo "=========================================="
+                
+                VALIDATION_FAILED=0
+                
+                # Check if repos.csv exists
+                CSV_FILE="bash/repos.csv"
+                if [ ! -f "$CSV_FILE" ]; then
+                  echo "❌ ERROR: repos.csv file not found at $CSV_FILE"
+                  VALIDATION_FAILED=1
+                fi
+                
+                if [ $VALIDATION_FAILED -eq 0 ]; then
+                  echo "✅ repos.csv file exists"
+                  
+                  # Check if file is not empty
+                  if [ ! -s "$CSV_FILE" ]; then
+                    echo "❌ ERROR: repos.csv file is empty"
+                    VALIDATION_FAILED=1
+                  else
+                    echo "✅ repos.csv file is not empty"
+                  fi
+                fi
+                
+                if [ $VALIDATION_FAILED -eq 0 ]; then
+                  # Read header and validate required columns
+                  HEADER=$(head -n 1 "$CSV_FILE")
+                  echo ""
+                  echo "CSV Header: $HEADER"
+                  echo ""
+                  
+                  # Check for required columns for migration
+                  REQUIRED_COLUMNS=("org" "teamproject" "repo" "github_org" "github_repo" "gh_repo_visibility")
+                  MISSING_COLUMNS=()
+                  
+                  for col in "${REQUIRED_COLUMNS[@]}"; do
+                    if ! echo "$HEADER" | grep -q "$col"; then
+                      MISSING_COLUMNS+=("$col")
+                    fi
+                  done
+                  
+                  if [ ${#MISSING_COLUMNS[@]} -gt 0 ]; then
+                    echo "❌ ERROR: Missing required columns in repos.csv:"
+                    for col in "${MISSING_COLUMNS[@]}"; do
+                      echo "  - $col"
+                    done
+                    VALIDATION_FAILED=1
+                  else
+                    echo "✅ All required columns present: ${REQUIRED_COLUMNS[*]}"
+                    
+                    # Count repositories to migrate
+                    REPO_COUNT=$(($(wc -l < "$CSV_FILE") - 1))
+                    echo ""
+                    echo "✅ Found $REPO_COUNT repositories to process"
+                  fi
+                fi
+                
+                echo "=========================================="
+                echo "##vso[task.setvariable variable=RepoValidationResult;isOutput=true]$VALIDATION_FAILED"
+                exit $VALIDATION_FAILED
+
+          - task: Bash@3
+            displayName: 'Validate pipelines.csv File'
+            continueOnError: true
+            name: PipelineValidation
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "=========================================="
+                echo "VALIDATING PIPELINES.CSV"
+                echo "=========================================="
+                
+                VALIDATION_FAILED=0
+                
+                # Check if pipelines.csv exists
+                CSV_FILE="bash/pipelines.csv"
+                if [ ! -f "$CSV_FILE" ]; then
+                  echo "❌ ERROR: pipelines.csv file not found at $CSV_FILE"
+                  VALIDATION_FAILED=1
+                fi
+                
+                if [ $VALIDATION_FAILED -eq 0 ]; then
+                  echo "✅ pipelines.csv file exists"
+                  
+                  # Check if file is not empty
+                  if [ ! -s "$CSV_FILE" ]; then
+                    echo "❌ ERROR: pipelines.csv file is empty"
+                    VALIDATION_FAILED=1
+                  else
+                    echo "✅ pipelines.csv file is not empty"
+                  fi
+                fi
+                
+                if [ $VALIDATION_FAILED -eq 0 ]; then
+                  # Read header and validate required columns
+                  HEADER=$(head -n 1 "$CSV_FILE")
+                  echo ""
+                  echo "CSV Header: $HEADER"
+                  echo ""
+                  
+                  # Check for required columns for pipeline rewiring
+                  REQUIRED_COLUMNS=("org" "teamproject" "pipeline" "serviceConnection" "github_org" "github_repo")
+                  MISSING_COLUMNS=()
+                  
+                  for col in "${REQUIRED_COLUMNS[@]}"; do
+                    if ! echo "$HEADER" | grep -q "$col"; then
+                      MISSING_COLUMNS+=("$col")
+                    fi
+                  done
+                  
+                  if [ ${#MISSING_COLUMNS[@]} -gt 0 ]; then
+                    echo "❌ ERROR: Missing required columns in pipelines.csv:"
+                    for col in "${MISSING_COLUMNS[@]}"; do
+                      echo "  - $col"
+                    done
+                    VALIDATION_FAILED=1
+                  else
+                    echo "✅ All required columns present: ${REQUIRED_COLUMNS[*]}"
+                    
+                    # Count pipelines to process
+                    PIPELINE_COUNT=$(($(wc -l < "$CSV_FILE") - 1))
+                    echo ""
+                    echo "✅ Found $PIPELINE_COUNT pipeline(s) to process"
+                  fi
+                fi
+                
+                echo "=========================================="
+                echo "##vso[task.setvariable variable=PipelineValidationResult;isOutput=true]$VALIDATION_FAILED"
+                exit $VALIDATION_FAILED
+
+          - task: Bash@3
+            displayName: 'Check Validation Results'
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "=========================================="
+                echo "VALIDATION SUMMARY"
+                echo "=========================================="
+                
+                REPO_RESULT=$(RepoValidation.RepoValidationResult)
+                PIPELINE_RESULT=$(PipelineValidation.PipelineValidationResult)
+                
+                if [ "$REPO_RESULT" != "0" ]; then
+                  echo "❌ repos.csv validation FAILED"
+                fi
+                
+                if [ "$PIPELINE_RESULT" != "0" ]; then
+                  echo "❌ pipelines.csv validation FAILED"
+                fi
+                
+                if [ "$REPO_RESULT" != "0" ] || [ "$PIPELINE_RESULT" != "0" ]; then
+                  echo ""
+                  echo "=========================================="
+                  echo "❌ PREREQUISITE VALIDATION FAILED"
+                  echo "Please fix the errors above before proceeding"
+                  echo "=========================================="
+                  exit 1
+                fi
+                
+                echo "✅ All CSV files validated successfully"
+                echo "=========================================="
+
+  - stage: MigrationReadinessCheck
+    displayName: 'Stage 2: PR & Pipeline Check'
+    dependsOn: PrerequisiteValidation
+    # PAT Tokens Used: GH_TOKEN, ADO_PAT (from core-entauto-github-migration-secrets)
+    jobs:
+      - job: ReadinessCheck
+        displayName: 'Run Readiness Check Script'
+        ${{ if eq(parameters.useSelfHostedAgent, true) }}:
+          pool:
+            name: ${{ parameters.selfHostedAgentPool }}
+        steps:
+          - checkout: self
+          
+          - task: Bash@3
+            displayName: 'Install Prerequisites (jq, GitHub CLI)'
+            inputs:
+              targetType: 'inline'
+              script: |
+                set -e
+                echo "Installing prerequisites..."
+                type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+                
+                # Install jq (required for JSON parsing in readiness check)
+                echo "Installing jq..."
+                sudo apt update
+                sudo apt install -y jq
+                echo "✅ jq installed: $(jq --version)"
+                
+                # Install GitHub CLI
+                echo ""
+                echo "Installing GitHub CLI..."
+                curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+                sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+                echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+                sudo apt update
+                sudo apt install gh -y
+                
+                echo ""
+                echo "✅ GitHub CLI installed:"
+                gh --version
+          - task: Bash@3
+            displayName: 'Fix line endings'
+            inputs:
+              targetType: 'inline'
+              script: |
+                sed -i 's/\r$//' bash/1_pr_pipeline_check.sh
+          - task: Bash@3
+            displayName: 'Execute Migration Readiness Check'
+            inputs:
+              targetType: 'filePath'
+              filePath: 'bash/1_pr_pipeline_check.sh'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+            env:
+              GH_TOKEN: $(GH_PAT)
+              GH_PAT: $(GH_PAT)
+              ADO_PAT: $(ADO_PAT)
+      
+      - job: WaitForApprovalToMigrate
+        displayName: '⏸️ Approve to START MIGRATION'
+        dependsOn: ReadinessCheck
+        condition: succeeded()
+        pool: server
+        timeoutInMinutes: 1440
+        steps:
+          - task: ManualValidation@0
+            displayName: 'Review Readiness & Approve Migration'
+            inputs:
+              notifyUsers: '$(Build.RequestedForEmail)'
+              instructions: |
+                ⚠️ **IMPORTANT**: Ensure no active work is in progress before proceeding to the next stage.
+                
+                ### 📊 What to Review
+                1. Review the logs above for any errors or warnings
+                2. Check for any active pull requests related to the repositories being migrated
+                3. Verify whether any CI pipelines are currently running or queued to run
+                4. If any related jobs are in progress, resolve or complete them before proceeding
+                
+                ### ⏭️ Next Stage: Repo Migration
+                ✅ Click **Resume** to proceed to the next stage  
+                ❌ Click **Reject** to stop the pipeline
+              onTimeout: 'reject'
+
+  - stage: Migration
+    displayName: 'Stage 3: Repo Migration'
+    dependsOn: MigrationReadinessCheck
+    # PAT Tokens Used: GH_TOKEN, ADO_PAT (from core-entauto-github-migration-secrets)
+    jobs:
+      - job: RunMigration
+        displayName: 'Run Migration Script'
+        ${{ if eq(parameters.useSelfHostedAgent, true) }}:
+          pool:
+            name: ${{ parameters.selfHostedAgentPool }}
+        steps:
+          - checkout: self
+            clean: true
+          
+          - task: Bash@3
+            displayName: 'Install GitHub CLI'
+            inputs:
+              targetType: 'inline'
+              script: |
+                set -e
+                echo "Installing GitHub CLI..."
+                type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+                curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+                sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+                echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+                sudo apt update
+                sudo apt install gh -y
+                
+                echo ""
+                echo "✅ GitHub CLI installed:"
+                gh --version
+
+          - task: Bash@3
+            displayName: 'Install gh-ado2gh Extension'
+            inputs:
+              targetType: 'inline'
+              script: |
+                set -e
+                set -euo pipefail
+                echo "Installing gh-ado2gh extension..."
+
+                # Attempt install (don't fail pipeline yet)
+                gh extension install github/gh-ado2gh >/dev/null 2>&1 || true
+
+                # ✅ Always validate using extension list
+                if gh extension list | grep -qi "gh-ado2gh"; then
+                    echo "✅ Extension is installed (verified via gh extension list)"
+                    gh extension list
+                    exit 0
+                fi
+
+                # ❌ Permission/self-hosted agent issues (optional deeper check)
+                OUTPUT=$(gh extension install github/gh-ado2gh 2>&1 || true)
+
+                if echo "$OUTPUT" | grep -qiE "permission denied|not permitted|access denied"; then
+                    echo "❌ Permission issue detected on self-hosted agent"
+                    echo "##vso[task.logissue type=error]Agent does not have permission to install extensions."
+                    exit 1
+                fi
+
+                # ❌ All other failures
+                echo "❌ Extension installation failed - extension not found in gh list"
+                echo "##vso[task.logissue type=error]gh-ado2gh installation validation failed."
+                exit 1
+            env:
+              GH_TOKEN: $(GH_PAT)
+          - task: Bash@3
+            displayName: 'Fix line endings'
+            inputs:
+              targetType: 'inline'
+              script: |
+                sed -i 's/\r$//' bash/2_migration.sh
+          - task: Bash@3
+            displayName: 'Execute Migration'
+            name: MigrationTask
+            inputs:
+              targetType: 'filePath'
+              filePath: 'bash/2_migration.sh'
+              arguments: '--csv bash/repos.csv'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+            env:
+              GH_TOKEN: $(GH_PAT)
+              GH_PAT: $(GH_PAT)
+              ADO_PAT: $(ADO_PAT)
+            ${{ if eq(parameters.useSelfHostedAgent, true) }}:
+              timeoutInMinutes: 0  # No timeout for self-hosted agents
+            ${{ else }}:
+              timeoutInMinutes: 120  # 2 hours timeout for Microsoft-hosted agents
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish repos_with_status.csv'
+            condition: always()
+            inputs:
+              PathtoPublish: '$(System.DefaultWorkingDirectory)/repos_with_status.csv'
+              ArtifactName: 'migration-results'
+              publishLocation: 'Container'
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Migration Logs'
+            condition: always()
+            inputs:
+              PathtoPublish: '$(System.DefaultWorkingDirectory)'
+              ArtifactName: 'migration-logs'
+              publishLocation: 'Container'
+            continueOnError: true
+
+  - stage: PostMigrationValidation
+    displayName: 'Stage 4: Migration Validation'
+    dependsOn: Migration
+    condition: in(dependencies.Migration.result, 'Succeeded', 'SucceededWithIssues')
+    # PAT Tokens Used: GH_TOKEN, ADO_PAT (from core-entauto-github-migration-secrets)
+    jobs:
+      - job: ValidationCheck
+        displayName: 'Run Validation Script'
+        ${{ if eq(parameters.useSelfHostedAgent, true) }}:
+          pool:
+            name: ${{ parameters.selfHostedAgentPool }}
+        steps:
+          - checkout: self
+
+          - task: DownloadBuildArtifacts@1
+            displayName: 'Download repos_with_status.csv'
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'migration-results'
+              downloadPath: '$(System.DefaultWorkingDirectory)'
+
+          - task: Bash@3
+            displayName: 'Prepare repos_with_status.csv'
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Move repos_with_status.csv to root for scripts to use
+                if [ -f "$(System.DefaultWorkingDirectory)/migration-results/repos_with_status.csv" ]; then
+                  cp "$(System.DefaultWorkingDirectory)/migration-results/repos_with_status.csv" "$(System.DefaultWorkingDirectory)/repos_with_status.csv"
+                  echo "✅ repos_with_status.csv loaded ($(wc -l < repos_with_status.csv) lines)"
+                else
+                  echo "##[error]repos_with_status.csv not found in artifacts"
+                  exit 1
+                fi
+
+          - task: Bash@3
+            displayName: 'Install GitHub CLI'
+            inputs:
+              targetType: 'inline'
+              script: |
+                set -e
+                echo "Installing GitHub CLI..."
+                type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+                curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+                sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+                echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+                sudo apt update
+                sudo apt install gh -y
+                
+                echo ""
+                echo "✅ GitHub CLI installed:"
+                gh --version
+          - task: Bash@3
+            displayName: 'Fix line endings'
+            inputs:
+              targetType: 'inline'
+              script: |
+                sed -i 's/\r$//' bash/3_post_migration_validation.sh
+
+          - task: Bash@3
+            displayName: 'Execute Post-Migration Validation'
+            name: ValidationTask
+            inputs:
+              targetType: 'filePath'
+              filePath: bash/3_post_migration_validation.sh
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+            env:
+              GH_TOKEN: $(GH_PAT)
+              GH_PAT: $(GH_PAT)
+              ADO_PAT: $(ADO_PAT)
+            timeoutInMinutes: 60
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Validation Logs'
+            condition: always()
+            inputs:
+              PathtoPublish: '$(System.DefaultWorkingDirectory)'
+              ArtifactName: 'validation-logs'
+              publishLocation: 'Container'
+            continueOnError: true
+
+          - task: Bash@3
+            displayName: 'Migration Summary'
+            condition: always()
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "=========================================="
+                echo "MIGRATION SUMMARY"
+                echo "=========================================="
+                echo "Pipeline: $(Build.DefinitionName)"
+                echo "Build Number: $(Build.BuildNumber)"
+                echo "Build ID: $(Build.BuildId)"
+                echo ""
+                echo "Artifacts published:"
+                echo "  - migration-logs"
+                echo "  - validation-logs"
+                echo ""
+                echo "Review artifacts for detailed migration results."
+                echo "=========================================="
+
+  - stage: PipelineRewiring
+    displayName: 'Stage 5: Pipeline Rewiring'
+    dependsOn:
+      - Migration
+      - PostMigrationValidation
+    condition: |
+      and(
+        eq('${{ parameters.runDemoRepoMigration }}', false),
+        in(dependencies.Migration.result, 'Succeeded', 'SucceededWithIssues')
+      )
+    # PAT Tokens Used: GH_TOKEN, ADO_PAT (from core-entauto-github-migration-secrets)
+    jobs:
+      - job: RewirePipelines
+        displayName: 'Run Pipeline Rewiring'
+        ${{ if eq(parameters.useSelfHostedAgent, true) }}:
+          pool:
+            name: ${{ parameters.selfHostedAgentPool }}
+        steps:
+          - checkout: self
+
+          - task: DownloadBuildArtifacts@1
+            displayName: 'Download repos_with_status.csv'
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'migration-results'
+              downloadPath: '$(System.DefaultWorkingDirectory)'
+
+          - task: Bash@3
+            displayName: 'Prepare repos_with_status.csv'
+            inputs:
+              targetType: 'inline'
+              script: |
+                if [ -f "$(System.DefaultWorkingDirectory)/migration-results/repos_with_status.csv" ]; then
+                  cp "$(System.DefaultWorkingDirectory)/migration-results/repos_with_status.csv" "$(System.DefaultWorkingDirectory)/repos_with_status.csv"
+                  echo "✅ repos_with_status.csv loaded ($(wc -l < repos_with_status.csv) lines)"
+                else
+                  echo "##[error]repos_with_status.csv not found in artifacts"
+                  exit 1
+                fi
+
+          - task: Bash@3
+            displayName: 'Install GitHub CLI'
+            inputs:
+              targetType: 'inline'
+              script: |
+                set -e
+                echo "Installing GitHub CLI..."
+                type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+                curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+                sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+                echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+                sudo apt update
+                sudo apt install gh -y
+                
+                echo ""
+                echo "✅ GitHub CLI installed:"
+                gh --version
+
+          - task: Bash@3
+            displayName: 'Install gh-ado2gh Extension'
+            inputs:
+              targetType: 'inline'
+              script: |
+                set -e
+                set -euo pipefail
+                echo "Installing gh-ado2gh extension..."
+
+                # Attempt install (don't fail pipeline yet)
+                gh extension install github/gh-ado2gh >/dev/null 2>&1 || true
+
+                # ✅ Always validate using extension list
+                if gh extension list | grep -qi "gh-ado2gh"; then
+                    echo "✅ Extension is installed (verified via gh extension list)"
+                    gh extension list
+                    exit 0
+                fi
+
+                # ❌ Permission/self-hosted agent issues (optional deeper check)
+                OUTPUT=$(gh extension install github/gh-ado2gh 2>&1 || true)
+
+                if echo "$OUTPUT" | grep -qiE "permission denied|not permitted|access denied"; then
+                    echo "❌ Permission issue detected on self-hosted agent"
+                    echo "##vso[task.logissue type=error]Agent does not have permission to install extensions."
+                    exit 1
+                fi
+
+                # ❌ All other failures
+                echo "❌ Extension installation failed - extension not found in gh list"
+                echo "##vso[task.logissue type=error]gh-ado2gh installation validation failed."
+                exit 1
+            env:
+              GH_TOKEN: $(GH_PAT)
+          - task: Bash@3
+            displayName: 'Fix line endings'
+            inputs:
+              targetType: 'inline'
+              script: |
+                sed -i 's/\r$//' bash/4_rewire_pipeline.sh
+
+          - task: Bash@3
+            displayName: 'Execute Pipeline Rewiring'
+            name: RewiringTask
+            inputs:
+              targetType: 'filePath'
+              filePath: 'bash/4_rewire_pipeline.sh'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+            env:
+              GH_TOKEN: $(GH_PAT)
+              GH_PAT: $(GH_PAT)
+              ADO_PAT: $(ADO_PAT)
+            timeoutInMinutes: 60
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Rewiring Logs'
+            condition: always()
+            inputs:
+              PathtoPublish: '$(System.DefaultWorkingDirectory)'
+              ArtifactName: 'rewiring-logs'
+              publishLocation: 'Container'
+            continueOnError: true
+
+          - task: Bash@3
+            displayName: 'Rewiring Summary'
+            condition: always()
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "=========================================="
+                echo "PIPELINE REWIRING SUMMARY"
+                echo "=========================================="
+                echo "Build Number: $(Build.BuildNumber)"
+                echo ""
+                echo "Check the rewiring-logs artifact for detailed results"
+                echo "Log files: pipeline-rewiring-*.txt"
+                echo "=========================================="
+
+  - stage: AzureBoardsIntegration
+    displayName: 'Stage 6: Boards Integration'
+    dependsOn:
+      - Migration
+      - PostMigrationValidation
+      - PipelineRewiring
+    condition: |
+      and(
+        eq('${{ parameters.runDemoRepoMigration }}', false),
+        eq('${{ parameters.skipBoardsIntegration }}', false),
+        in(dependencies.Migration.result, 'Succeeded', 'SucceededWithIssues')
+      )
+    # PAT Tokens Used: GH_PAT, ADO_PAT (from azure-boards-integration-secrets)
+    # IMPORTANT: This stage uses a SEPARATE variable group with ADO_PAT having limited Boards-only scopes
+    # This is NOT the same ADO_PAT used in migration stages
+    variables:
+      # Variable group for Azure Boards integration PAT tokens (Stage 6 only)
+      # Contains: GH_PAT, ADO_PAT (separate token with limited Boards-only scopes)
+      # Required scopes for ADO_PAT: Code (Read), Work Items (Read, Write), Project and Team (Read)
+      - group: azure-boards-integration-secrets
+    jobs:
+      - job: IntegrateBoards
+        displayName: 'Integrate Azure Boards with GitHub'
+        ${{ if eq(parameters.useSelfHostedAgent, true) }}:
+          pool:
+            name: ${{ parameters.selfHostedAgentPool }}
+        steps:
+          - checkout: self
+
+          - task: DownloadBuildArtifacts@1
+            displayName: 'Download repos_with_status.csv'
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'migration-results'
+              downloadPath: '$(System.DefaultWorkingDirectory)'
+
+          - task: Bash@3
+            displayName: 'Prepare repos_with_status.csv'
+            inputs:
+              targetType: 'inline'
+              script: |
+                if [ -f "$(System.DefaultWorkingDirectory)/migration-results/repos_with_status.csv" ]; then
+                  cp "$(System.DefaultWorkingDirectory)/migration-results/repos_with_status.csv" "$(System.DefaultWorkingDirectory)/repos_with_status.csv"
+                  echo "✅ repos_with_status.csv loaded ($(wc -l < repos_with_status.csv) lines)"
+                else
+                  echo "##[error]repos_with_status.csv not found in artifacts"
+                  exit 1
+                fi
+
+          - task: Bash@3
+            displayName: 'Install GitHub CLI'
+            inputs:
+              targetType: 'inline'
+              script: |
+                set -e
+                echo "Installing GitHub CLI..."
+                type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+                curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+                sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+                echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+                sudo apt update
+                sudo apt install gh -y
+                
+                echo ""
+                echo "✅ GitHub CLI installed:"
+                gh --version
+
+          - task: Bash@3
+            displayName: 'Install gh-ado2gh Extension'
+            inputs:
+              targetType: 'inline'
+              script: |
+                set -e
+                set -euo pipefail
+                echo "Installing gh-ado2gh extension..."
+
+                # Attempt install (don't fail pipeline yet)
+                gh extension install github/gh-ado2gh >/dev/null 2>&1 || true
+
+                # ✅ Always validate using extension list
+                if gh extension list | grep -qi "gh-ado2gh"; then
+                    echo "✅ Extension is installed (verified via gh extension list)"
+                    gh extension list
+                    exit 0
+                fi
+
+                # ❌ Permission/self-hosted agent issues (optional deeper check)
+                OUTPUT=$(gh extension install github/gh-ado2gh 2>&1 || true)
+
+                if echo "$OUTPUT" | grep -qiE "permission denied|not permitted|access denied"; then
+                    echo "❌ Permission issue detected on self-hosted agent"
+                    echo "##vso[task.logissue type=error]Agent does not have permission to install extensions."
+                    exit 1
+                fi
+
+                # ❌ All other failures
+                echo "❌ Extension installation failed - extension not found in gh list"
+                echo "##vso[task.logissue type=error]gh-ado2gh installation validation failed."
+                exit 1
+            env:
+              GH_TOKEN: $(GH_PAT)
+          - task: Bash@3
+            displayName: 'Fix line endings'
+            inputs:
+              targetType: 'inline'
+              script: |
+                sed -i 's/\r$//' bash/5_boards_integration.sh
+                
+          - task: Bash@3
+            displayName: 'Execute Azure Boards Integration'
+            name: BoardsIntegrationTask
+            inputs:
+              targetType: 'filePath'
+              filePath: 'bash/5_boards_integration.sh'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+            env:
+              # CRITICAL: Using ADO_PAT from azure-boards-integration-secrets variable group
+              # This is a DIFFERENT token than migration ADO_PAT with Boards-only scopes
+              ADO_PAT: $(ADO_PAT)
+              GH_PAT: $(GH_PAT)
+            timeoutInMinutes: 60
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Azure Boards Integration Logs'
+            condition: always()
+            inputs:
+              PathtoPublish: '$(System.DefaultWorkingDirectory)'
+              ArtifactName: 'boards-integration-logs'
+              publishLocation: 'Container'
+            continueOnError: true
+
+          - task: Bash@3
+            displayName: 'Azure Boards Integration Summary'
+            condition: always()
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "=========================================="
+                echo "AZURE BOARDS INTEGRATION SUMMARY"
+                echo "=========================================="
+                echo "Build Number: $(Build.BuildNumber)"
+                echo ""
+                echo "Check the boards-integration-logs artifact for detailed results"
+                echo "Log file: azure-boards-integration-*.log"
+                echo "=========================================="
