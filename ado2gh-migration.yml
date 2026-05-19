@@ -27,7 +27,7 @@ variables:
   - group: core-entauto-github-migration-secrets
 
 pool:
-  vmImage: 'ubuntu-latest'
+   vmImage: 'ubuntu-latest'
   
 
 stages:
@@ -331,30 +331,52 @@ stages:
             inputs:
               targetType: 'inline'
               script: |
-                set -e
                 set -euo pipefail
+
+                echo "Validating GH_PAT authentication..."
+
+                # ✅ Check if GH_PAT is set
+                if [ -z "${GH_PAT:-}" ]; then
+                    echo "❌ GH_PAT is not set"
+                    echo "##vso[task.logissue type=error]GitHub PAT is missing."
+                    exit 1
+                fi
+
+                # ✅ Authenticate using GH_PAT
+                echo "$GH_PAT" | gh auth login --with-token > /dev/null 2>&1 || true
+
+                # ✅ Validate token by calling GitHub API
+                if ! gh api user > /dev/null 2>&1; then
+                    echo "❌ Invalid or expired GH_PAT detected"
+                    echo "##vso[task.logissue type=error]GitHub PAT authentication failed. Please provide a valid token."
+                    exit 1
+                fi
+
+                echo "✅ GH_PAT authentication successful"
+
                 echo "Installing gh-ado2gh extension..."
 
-                # Attempt install (don't fail pipeline yet)
-                gh extension install github/gh-ado2gh >/dev/null 2>&1 || true
+                # Attempt install (don’t fail immediately)
+                gh extension install github/gh-ado2gh > /dev/null 2>&1 || true
 
-                # ✅ Always validate using extension list
+                # ✅ Validate installation
                 if gh extension list | grep -qi "gh-ado2gh"; then
                     echo "✅ Extension is installed (verified via gh extension list)"
                     gh extension list
                     exit 0
                 fi
 
-                # ❌ Permission/self-hosted agent issues (optional deeper check)
+                # ❌ Retry install to capture failure reason
                 OUTPUT=$(gh extension install github/gh-ado2gh 2>&1 || true)
 
+                # Permission-related failure
                 if echo "$OUTPUT" | grep -qiE "permission denied|not permitted|access denied"; then
                     echo "❌ Permission issue detected on self-hosted agent"
                     echo "##vso[task.logissue type=error]Agent does not have permission to install extensions."
                     exit 1
                 fi
 
-                # ❌ All other failures
+                # Generic failure
                 echo "❌ Extension installation failed - extension not found in gh list"
                 echo "##vso[task.logissue type=error]gh-ado2gh installation validation failed."
                 exit 1
@@ -566,30 +588,52 @@ stages:
             inputs:
               targetType: 'inline'
               script: |
-                set -e
                 set -euo pipefail
+
+                echo "Validating GH_PAT authentication..."
+
+                # ✅ Check if GH_PAT is set
+                if [ -z "${GH_PAT:-}" ]; then
+                    echo "❌ GH_PAT is not set"
+                    echo "##vso[task.logissue type=error]GitHub PAT is missing."
+                    exit 1
+                fi
+
+                # ✅ Authenticate using GH_PAT
+                echo "$GH_PAT" | gh auth login --with-token > /dev/null 2>&1 || true
+
+                # ✅ Validate token by calling GitHub API
+                if ! gh api user > /dev/null 2>&1; then
+                    echo "❌ Invalid or expired GH_PAT detected"
+                    echo "##vso[task.logissue type=error]GitHub PAT authentication failed. Please provide a valid token."
+                    exit 1
+                fi
+
+                echo "✅ GH_PAT authentication successful"
+
                 echo "Installing gh-ado2gh extension..."
 
-                # Attempt install (don't fail pipeline yet)
-                gh extension install github/gh-ado2gh >/dev/null 2>&1 || true
+                # Attempt install (don’t fail immediately)
+                gh extension install github/gh-ado2gh > /dev/null 2>&1 || true
 
-                # ✅ Always validate using extension list
+                # ✅ Validate installation
                 if gh extension list | grep -qi "gh-ado2gh"; then
                     echo "✅ Extension is installed (verified via gh extension list)"
                     gh extension list
                     exit 0
                 fi
 
-                # ❌ Permission/self-hosted agent issues (optional deeper check)
+                # ❌ Retry install to capture failure reason
                 OUTPUT=$(gh extension install github/gh-ado2gh 2>&1 || true)
 
+                # Permission-related failure
                 if echo "$OUTPUT" | grep -qiE "permission denied|not permitted|access denied"; then
                     echo "❌ Permission issue detected on self-hosted agent"
                     echo "##vso[task.logissue type=error]Agent does not have permission to install extensions."
                     exit 1
                 fi
 
-                # ❌ All other failures
+                # Generic failure
                 echo "❌ Extension installation failed - extension not found in gh list"
                 echo "##vso[task.logissue type=error]gh-ado2gh installation validation failed."
                 exit 1
@@ -712,30 +756,52 @@ stages:
             inputs:
               targetType: 'inline'
               script: |
-                set -e
                 set -euo pipefail
+
+                echo "Validating GH_PAT authentication..."
+
+                # ✅ Check if GH_PAT is set
+                if [ -z "${GH_PAT:-}" ]; then
+                    echo "❌ GH_PAT is not set"
+                    echo "##vso[task.logissue type=error]GitHub PAT is missing."
+                    exit 1
+                fi
+
+                # ✅ Authenticate using GH_PAT
+                echo "$GH_PAT" | gh auth login --with-token > /dev/null 2>&1 || true
+
+                # ✅ Validate token by calling GitHub API
+                if ! gh api user > /dev/null 2>&1; then
+                    echo "❌ Invalid or expired GH_PAT detected"
+                    echo "##vso[task.logissue type=error]GitHub PAT authentication failed. Please provide a valid token."
+                    exit 1
+                fi
+
+                echo "✅ GH_PAT authentication successful"
+
                 echo "Installing gh-ado2gh extension..."
 
-                # Attempt install (don't fail pipeline yet)
-                gh extension install github/gh-ado2gh >/dev/null 2>&1 || true
+                # Attempt install (don’t fail immediately)
+                gh extension install github/gh-ado2gh > /dev/null 2>&1 || true
 
-                # ✅ Always validate using extension list
+                # ✅ Validate installation
                 if gh extension list | grep -qi "gh-ado2gh"; then
                     echo "✅ Extension is installed (verified via gh extension list)"
                     gh extension list
                     exit 0
                 fi
 
-                # ❌ Permission/self-hosted agent issues (optional deeper check)
+                # ❌ Retry install to capture failure reason
                 OUTPUT=$(gh extension install github/gh-ado2gh 2>&1 || true)
 
+                # Permission-related failure
                 if echo "$OUTPUT" | grep -qiE "permission denied|not permitted|access denied"; then
                     echo "❌ Permission issue detected on self-hosted agent"
                     echo "##vso[task.logissue type=error]Agent does not have permission to install extensions."
                     exit 1
                 fi
 
-                # ❌ All other failures
+                # Generic failure
                 echo "❌ Extension installation failed - extension not found in gh list"
                 echo "##vso[task.logissue type=error]gh-ado2gh installation validation failed."
                 exit 1
