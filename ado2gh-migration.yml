@@ -382,6 +382,7 @@ stages:
                 exit 1
             env:
               GH_TOKEN: $(GH_PAT)
+              GH_PAT: $(GH_PAT)
           - task: Bash@3
             displayName: 'Fix line endings'
             inputs:
@@ -639,6 +640,7 @@ stages:
                 exit 1
             env:
               GH_TOKEN: $(GH_PAT)
+              GH_PAT: $(GH_PAT)
           - task: Bash@3
             displayName: 'Fix line endings'
             inputs:
@@ -807,6 +809,7 @@ stages:
                 exit 1
             env:
               GH_TOKEN: $(GH_PAT)
+              GH_PAT: $(GH_PAT)
           - task: Bash@3
             displayName: 'Fix line endings'
             inputs:
